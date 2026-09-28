@@ -1,85 +1,32 @@
-import { SlashCommandBuilder, ChannelType, PermissionFlagsBits } from "discord.js";
-import { customAlphabet } from "nanoid";
-import { createOrder, setPreference } from "../db.js";
-import { criarLinkPagamento } from "../mercadopago.js";
-
-const nanoid = customAlphabet("abcdefghijklmnopqrstuvwxyz0123456789", 8);
-
-export const data = new SlashCommandBuilder()
-  .setName("vender")
-  .setDescription("Cria uma negociação segura entre você e um comprador")
-  .addUserOption((opt) =>
-    opt.setName("comprador").setDescription("Quem está comprando").setRequired(true)
-  )
-  .addStringOption((opt) =>
-    opt.setName("descricao").setDescription("O que está sendo vendido").setRequired(true)
-  )
-  .addNumberOption((opt) =>
-    opt.setName("preco").setDescription("Preço em reais (ex: 150.90)").setRequired(true)
-  );
-
-export async function execute(interaction) {
-  const buyer = interaction.options.getUser("comprador");
-  const description = interaction.options.getString("descricao");
-  const price = interaction.options.getNumber("preco");
-  const seller = interaction.user;
-
-  if (buyer.id === seller.id) {
-    return interaction.reply({ content: "Você não pode vender pra si mesmo.", ephemeral: true });
-  }
-  if (price <= 0) {
-    return interaction.reply({ content: "O preço precisa ser maior que zero.", ephemeral: true });
-  }
-
-  await interaction.deferReply({ ephemeral: true });
-
-  // Cria um canal privado só pra essa negociação (comprador + vendedor + staff)
-  const orderId = `ord_${nanoid()}`;
-  const staffRoleId = process.env.STAFF_ROLE_ID;
-
-  const channel = await interaction.guild.channels.create({
-    name: `pedido-${orderId.slice(4)}`,
-    type: ChannelType.GuildText,
-    permissionOverwrites: [
-      { id: interaction.guild.roles.everyone.id, deny: [PermissionFlagsBits.ViewChannel] },
-      { id: buyer.id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages] },
-      { id: seller.id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages] },
-      ...(staffRoleId
-        ? [{ id: staffRoleId, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages] }]
-        : []),
-    ],
-  });
-
-  const amountCents = Math.round(price * 100);
-
-  createOrder({
-    id: orderId,
-    guild_id: interaction.guild.id,
-    channel_id: channel.id,
-    buyer_id: buyer.id,
-    seller_id: seller.id,
-    description,
-    amount_cents: amountCents,
-    created_at: new Date().toISOString(),
-  });
-
-  const { preferenceId, checkoutUrl } = await criarLinkPagamento({
-    orderId,
-    description,
-    amountCents,
-  });
-  setPreference(orderId, preferenceId);
-
-  await channel.send(
-    `📦 **Novo pedido — ${orderId}**\n` +
-    `**Item:** ${description}\n` +
-    `**Valor:** R$ ${price.toFixed(2)}\n` +
-    `**Comprador:** <@${buyer.id}>\n` +
-    `**Vendedor:** <@${seller.id}>\n\n` +
-    `${buyer}, pague com segurança pelo link abaixo. O valor fica retido até você confirmar o recebimento:\n${checkoutUrl}\n\n` +
-    `Depois de receber o produto, rode \`/confirmar-recebimento\` neste canal.\n` +
-    `Se algo der errado, use \`/abrir-disputa\`.`
-  );
-
-  return interaction.editReply({ content: `Pedido criado em ${channel}.` });
+import { cents, requireThat } from '../domain.js';
+import { definition, stringOption } from './common.js';
+export const data=definition('vender','Cria pedido com pagamento na conta da operação e repasse manual',[
+  {type:6,name:'comprador',description:'Comprador do produto',required:true},
+  stringOption('descricao','Descrição do produto',true,{min_length:1,max_length:250}),
+  {type:10,name:'preco',description:'Valor em reais, com até duas casas decimais',required:true,min_value:1,max_value:1000000},
+]);
+export async function execute(i,ctx) {
+  const buyer=i.options.getUser('comprador'),description=i.options.getString('descricao').trim();
+  const amount=cents(i.options.getNumber('preco'));
+  requireThat(buyer && !buyer.bot && buyer.id!==i.user.id,'Escolha outro usuário humano como comprador.');
+  requireThat(description.length>0 && description.length<=250,'Descrição inválida.');
+  requireThat(amount>=100 && amount<=ctx.config.maxOrderCents,'Valor fora do limite configurado.');
+  await i.guild.members.fetch(buyer.id);
+  const id=`ord_${i.id}`;
+  const existing=ctx.store.get(id);
+  if(existing)return i.editReply({content:`Pedido já registrado: <#${existing.channel_id}>. Use /pedido-status.`});
+  const permissions=[1024n,2048n,65536n]; // ViewChannel, SendMessages, ReadMessageHistory
+  const channel=await i.guild.channels.create({name:`pedido-${i.id.slice(-12)}`,type:0,
+    permissionOverwrites:[
+      {id:i.guild.roles.everyone.id,deny:[1024n]},
+      {id:ctx.client.user.id,allow:permissions},
+      {id:buyer.id,allow:permissions},{id:i.user.id,allow:permissions},
+      {id:ctx.config.staffRoleId,allow:permissions},
+    ]});
+  let order;
+  try { order=ctx.store.create({id,guild_id:i.guildId,channel_id:channel.id,buyer_id:buyer.id,seller_id:i.user.id,description,amount_cents:amount}); }
+  catch(error){await channel.delete('Pedido não foi registrado').catch(()=>{});throw error;}
+  try { ctx.store.checkout(id,await ctx.mp.createPreference(order)); }
+  catch { ctx.store.checkoutFailed(id);return i.editReply({content:`Pedido <#${channel.id}> exige conferência: checkout não confirmado. A staff foi notificada.`}); }
+  return i.editReply({content:`Pedido criado em <#${channel.id}>. O link será publicado pela fila de notificações.`});
 }

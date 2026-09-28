@@ -1,20 +1,16 @@
 {
   "name": "discord-escrow-bot",
-  "version": "1.0.0",
-  "description": "Bot de Discord com escrow de pagamentos (Mercado Pago) para vendas de roupa",
+  "version": "2.0.0",
+  "private": true,
+  "description": "Controle de pedidos e pagamentos com repasse manual auditado",
   "type": "module",
-  "main": "src/index.js",
+  "engines": { "node": ">=24.15.0 <25" },
   "scripts": {
-    "start": "node src/index.js",
-    "deploy-commands": "node src/deploy-commands.js",
-    "server": "node src/server.js"
+    "start": "node --env-file-if-exists=.env src/index.js",
+    "deploy-commands": "node --env-file-if-exists=.env src/deploy-commands.js",
+    "test": "node --test",
+    "check": "node scripts/check.js",
+    "backup": "node --env-file-if-exists=.env scripts/backup.js"
   },
-  "dependencies": {
-    "better-sqlite3": "^11.3.0",
-    "discord.js": "^14.15.3",
-    "dotenv": "^16.4.5",
-    "express": "^4.19.2",
-    "mercadopago": "^2.0.15",
-    "nanoid": "^5.0.7"
-  }
+  "dependencies": { "discord.js": "14.27.0" }
 }

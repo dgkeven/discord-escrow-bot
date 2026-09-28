@@ -1,42 +1,9 @@
-import { SlashCommandBuilder } from "discord.js";
-import { getOrderByChannel, markReleased } from "../db.js";
-
-export const data = new SlashCommandBuilder()
-  .setName("confirmar-recebimento")
-  .setDescription("Confirma que você recebeu o produto e libera o pagamento ao vendedor");
-
-export async function execute(interaction) {
-  const order = getOrderByChannel(interaction.channelId);
-
-  if (!order) {
-    return interaction.reply({ content: "Nenhum pedido encontrado neste canal.", ephemeral: true });
-  }
-  if (interaction.user.id !== order.buyer_id) {
-    return interaction.reply({ content: "Só o comprador pode confirmar o recebimento.", ephemeral: true });
-  }
-  if (order.status !== "pago" && order.status !== "enviado") {
-    return interaction.reply({
-      content: `Este pedido está com status \`${order.status}\` e não pode ser confirmado agora.`,
-      ephemeral: true,
-    });
-  }
-
-  // AQUI é o ponto de liberação real do dinheiro. Nesta versão inicial, o
-  // valor já está na sua conta Mercado Pago (não na do vendedor) — marcar
-  // como liberado é o gatilho para você (admin) fazer o repasse via Pix.
-  // Para automatizar o repasse 100%, o próximo passo é configurar o
-  // Mercado Pago Marketplace com o vendedor conectando a própria conta.
-  markReleased(order.id);
-
-  await interaction.reply(
-    `✅ **Recebimento confirmado por <@${order.buyer_id}>.**\n` +
-    `Pagamento de R$ ${(order.amount_cents / 100).toFixed(2)} liberado para <@${order.seller_id}>.`
-  );
-
-  const staffRoleId = process.env.STAFF_ROLE_ID;
-  if (staffRoleId) {
-    await interaction.followUp(
-      `<@&${staffRoleId}> repassar R$ ${(order.amount_cents / 100).toFixed(2)} para <@${order.seller_id}> (pedido ${order.id}).`
-    );
-  }
+import { requireThat } from '../domain.js';
+import { definition, orderFor } from './common.js';
+export const data=definition('confirmar-recebimento','Confirma recebimento e autoriza análise do repasse manual');
+export async function execute(i,ctx) {
+  const order=orderFor(i,ctx);
+  requireThat(order.buyer_id===i.user.id,'Só o comprador pode confirmar.');
+  await ctx.service.action(order.id,o=>ctx.store.transition(o.id,o.version,['pago'],'repasse_pendente',i.user.id,'Comprador confirmou recebimento; nenhum dinheiro foi transferido.',{paid:true}));
+  return i.editReply({content:'Recebimento confirmado. A staff precisa conferir e executar o repasse manual.'});
 }

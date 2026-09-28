@@ -1,55 +1,41 @@
-import "dotenv/config";
-import express from "express";
-import { buscarPagamento } from "./mercadopago.js";
-import { getOrder, markPaid } from "./db.js";
+import { createServer } from 'node:http';
+import { verifyWebhook } from './webhook.js';
 
-/**
- * Este servidor roda separado do bot (mas pode importar o client do Discord
- * pra postar mensagens direto nos canais — veja `attachDiscordClient`).
- */
-const app = express();
-app.use(express.json());
-
-let discordClient = null;
-export function attachDiscordClient(client) {
-  discordClient = client;
-}
-
-app.post("/webhooks/mercadopago", async (req, res) => {
-  // Responde rápido — o Mercado Pago reenvia se não receber 200 a tempo.
-  res.sendStatus(200);
-
-  try {
-    const topic = req.body?.type || req.query.topic;
-    const paymentId = req.body?.data?.id || req.query.id;
-    if (topic !== "payment" || !paymentId) return;
-
-    const payment = await buscarPagamento(paymentId);
-    if (payment.status !== "approved") return;
-
-    const orderId = payment.external_reference;
-    const order = getOrder(orderId);
-    if (!order || order.status !== "aguardando_pagamento") return;
-
-    markPaid(order.id, String(paymentId));
-
-    if (discordClient) {
-      const channel = await discordClient.channels.fetch(order.channel_id).catch(() => null);
-      if (channel) {
-        await channel.send(
-          `💰 **Pagamento confirmado!** O valor está retido com segurança.\n` +
-          `Vendedor, pode enviar o produto. Quando o comprador receber, ele deve rodar \`/confirmar-recebimento\`.`
-        );
+export function createWebhookServer({ store, config, ready=()=>true }) {
+  let bucket=200, last=Date.now();
+  const server=createServer(async(req,res)=>{
+    res.setHeader('Content-Type','application/json');
+    const reply=(status,data={})=>{res.writeHead(status);res.end(JSON.stringify(data));};
+    try {
+      const url=new URL(req.url,'http://localhost');
+      if(req.method==='GET' && url.pathname==='/healthz') {
+        const health=store.health();
+        return reply(ready() && !health.failingJobs?200:503,{ready:ready(),...health});
       }
+      if(req.method!=='POST' || url.pathname!=='/webhooks/mercadopago')return reply(404);
+      const now=Date.now();bucket=Math.min(200,bucket+(now-last)*0.1);last=now;
+      if(bucket<1){req.resume();return reply(429);} bucket--;
+      if(!String(req.headers['content-type']||'').toLowerCase().startsWith('application/json')){req.resume();return reply(415);}
+      let length=0;const chunks=[];
+      for await(const chunk of req) {
+        length+=chunk.length;
+        if(length>16384){reply(413);req.resume();return;}
+        chunks.push(chunk);
+      }
+      let body;
+      try{body=JSON.parse(Buffer.concat(chunks).toString('utf8'));}catch{return reply(400);}
+      const event=verifyWebhook({url,headers:req.headers,body},config.webhookSecret);
+      if(!event)return reply(401);
+      // FULL synchronous SQLite commit happens before acknowledgment.
+      store.enqueue(event.eventId,event.paymentId);
+      return reply(200,{received:true});
+    }catch{
+      console.error(JSON.stringify({event:'webhook_failed'}));
+      if(!res.headersSent)reply(503);
+      else res.end();
     }
-  } catch (err) {
-    console.error("Erro ao processar webhook do Mercado Pago:", err);
-  }
-});
-
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`Webhook server do Mercado Pago rodando na porta ${PORT}`);
-});
-
-export default app;
+  });
+  server.requestTimeout=15000;
+  server.headersTimeout=10000;
+  return server;
+}

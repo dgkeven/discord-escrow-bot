@@ -1,50 +1,11 @@
-import { SlashCommandBuilder, PermissionFlagsBits } from "discord.js";
-import { getOrderByChannel, markReleased, setStatus } from "../db.js";
-
-export const data = new SlashCommandBuilder()
-  .setName("liberar-manual")
-  .setDescription("[Staff] Decide uma disputa: libera para o vendedor ou cancela o pedido")
-  .addStringOption((opt) =>
-    opt
-      .setName("decisao")
-      .setDescription("O que fazer com o pagamento retido")
-      .setRequired(true)
-      .addChoices(
-        { name: "Liberar para o vendedor", value: "liberar" },
-        { name: "Cancelar e devolver ao comprador", value: "cancelar" }
-      )
-  );
-
-export async function execute(interaction) {
-  const staffRoleId = process.env.STAFF_ROLE_ID;
-  const isStaff =
-    interaction.memberPermissions?.has(PermissionFlagsBits.Administrator) ||
-    (staffRoleId && interaction.member.roles.cache.has(staffRoleId));
-
-  if (!isStaff) {
-    return interaction.reply({ content: "Só a staff pode usar este comando.", ephemeral: true });
-  }
-
-  const order = getOrderByChannel(interaction.channelId);
-  if (!order) {
-    return interaction.reply({ content: "Nenhum pedido encontrado neste canal.", ephemeral: true });
-  }
-
-  const decisao = interaction.options.getString("decisao");
-
-  if (decisao === "liberar") {
-    markReleased(order.id);
-    return interaction.reply(
-      `⚖️ Disputa resolvida por <@${interaction.user.id}>: pagamento de R$ ${(order.amount_cents / 100).toFixed(2)} liberado para <@${order.seller_id}>.\n` +
-      `Lembrete: o repasse via Pix/transferência ainda precisa ser feito manualmente pela conta Mercado Pago da staff.`
-    );
-  }
-
-  // Nota: o estorno em si precisa ser feito no painel do Mercado Pago
-  // (ou via API de reembolso) — este comando só atualiza o status interno.
-  setStatus(order.id, "cancelado");
-  return interaction.reply(
-    `⚖️ Disputa resolvida por <@${interaction.user.id}>: pedido cancelado. ` +
-    `Estorne o pagamento para <@${order.buyer_id}> pelo painel do Mercado Pago.`
-  );
+import { definition, stringOption, orderFor, staffFor } from './common.js';
+export const data=definition('liberar-manual','Staff: autoriza repasse ou solicita reembolso; não movimenta dinheiro',[
+  stringOption('decisao','Decisão',true,{choices:[{name:'Autorizar repasse',value:'liberar'},{name:'Solicitar reembolso',value:'cancelar'}]}),
+  stringOption('motivo','Justificativa para auditoria',true,{min_length:5,max_length:500}),
+]);
+export async function execute(i,ctx) {
+  const order=orderFor(i,ctx);staffFor(i,ctx,order);
+  const release=i.options.getString('decisao')==='liberar';
+  await ctx.service.action(order.id,o=>ctx.store.transition(o.id,o.version,release?['disputa','revisao']:['pago','disputa','repasse_pendente','revisao'],release?'repasse_pendente':'reembolso_pendente',i.user.id,i.options.getString('motivo'),{paid:true}));
+  return i.editReply({content:release?'Repasse autorizado. Use /preparar-repasse antes de transferir.':'Reembolso solicitado. Faça o reembolso no painel Mercado Pago; o bot só confirma após consultar a API.'});
 }

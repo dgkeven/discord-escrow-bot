@@ -1,0 +1,19 @@
+name: Verify
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Install dependencies (commit the generated lockfile after initial validation)
+        run: npm install --ignore-scripts
+      - run: npm run check
+      - run: npm test
+      - name: Validate Discord import and command payloads
+        run: node scripts/discord-smoke.js
+      - run: npm audit --omit=dev --audit-level=high
